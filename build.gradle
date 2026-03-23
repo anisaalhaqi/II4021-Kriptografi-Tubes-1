@@ -4,7 +4,7 @@ plugins {
 }
 
 application {
-    mainClass = 'com.example.Main'
+    mainClass = 'com.steganography.Main'
 }
 
 repositories {
