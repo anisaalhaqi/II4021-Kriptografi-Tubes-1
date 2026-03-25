@@ -1,10 +1,16 @@
 plugins {
     id 'java'
     id 'application'
+    id 'org.openjfx.javafxplugin' version '0.1.0'
 }
 
 application {
-    mainClass = 'com.steganography.Main'
+    mainClass = 'com.steganography.ui.MainApp'
+}
+
+javafx {
+    version = '21'
+    modules = ['javafx.controls', 'javafx.graphics']
 }
 
 repositories {
@@ -15,4 +21,8 @@ dependencies {
     implementation 'org.bytedeco:javacv:1.5.10'
     implementation 'org.bytedeco:javacv-platform:1.5.10'
     implementation 'org.bytedeco:openblas-platform:0.3.26-1.5.10'
+}
+
+tasks.register('runCli', JavaExec) {
+    enabled = false
 }
