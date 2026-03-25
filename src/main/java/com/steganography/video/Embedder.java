@@ -1,135 +1,298 @@
 package com.steganography.video;
 
-import org.bytedeco.javacv.*;
-import org.bytedeco.opencv.opencv_core.Mat;
-import org.bytedeco.javacpp.indexer.UByteIndexer;
-
+import java.awt.image.BufferedImage;
 import java.io.File;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.BitSet;
 import java.util.Random;
 
 import com.steganography.crypto.A5;
+import com.steganography.crypto.SHA256;
+import com.steganography.utils.common.Scheme;
+import com.steganography.utils.common.Metrics;
+import com.steganography.utils.encoder.PixelEncoder;
+import com.steganography.utils.encoder.RandomEmbedSession;
+import com.steganography.utils.encoder.SequentialEmbedSession;
 
+// please refer to utils/encoder/*EmbedSession.java for detail :3
 public class Embedder {
+    private static final int FLAG_FILE = 0x01; // for text or file, representation: 001
+    private static final int FLAG_ENCRYPTED = 0x02; // for encrypted or not, representation: 010
+    private static final int FLAG_RANDOM = 0x04; // for random scheme or not, representation: 100
 
-    private A5 cipher;
+    // [flags][scheme][dataSize][fileNameLen]
+    // from left to right: 1 + 1 + 4 + 2 = 8 byte
+    private static final int HEADER_SIZE = 8;
 
-    public Embedder() {
-        this.cipher = new A5();
+    public EmbedResult embedText(File input, File output, String text, Long stegoKey, Long a5Key) throws Exception {
+        return embedText(input, output, text, toNullableString(stegoKey), toNullableString(a5Key), Scheme.RGB_332);
     }
 
-    public void embedText(File input, File output, String text, Long stegoKey, Long a5Key) throws Exception {
-        byte[] payload = text.getBytes("UTF-8");
-        processEmbedding(input, output, payload, stegoKey, a5Key);
+    public EmbedResult embedFile(File input, File output, File secretFile, Long stegoKey, Long a5Key) throws Exception {
+        return embedFile(input, output, secretFile, toNullableString(stegoKey), toNullableString(a5Key), Scheme.RGB_332);
     }
 
-    public void embedFile(File input, File output, File textFile, Long stegoKey, Long a5Key) throws Exception {
-        byte[] payload = Files.readAllBytes(textFile.toPath());
-        processEmbedding(input, output, payload, stegoKey, a5Key);
-    }
-
-    private void embedByte(UByteIndexer indexer, int width, int pixelIndex, byte value) {
-        long y = pixelIndex / width;
-        long x = pixelIndex % width;
-
-        int b = indexer.get(y, x, 0);
-        int g = indexer.get(y, x, 1);
-        int r = indexer.get(y, x, 2);
-
-        b = (b & 252) | (value & 3);
-        g = (g & 248) | ((value >> 2) & 7);
-        r = (r & 248) | ((value >> 5) & 7);
-
-        indexer.put(y, x, 0, b);
-        indexer.put(y, x, 1, g);
-        indexer.put(y, x, 2, r);
-    }
-
-    private void processEmbedding(File input, File output, byte[] payload, Long stegoKey, Long a5Key) throws Exception {
-        if (a5Key != null) {
-            payload = cipher.encrypt(payload, a5Key, 0);
+    public EmbedResult embedText(File input, File output, String text, String stegoKey, String encKey, Scheme scheme) throws Exception {
+        Reader reader = new Reader(input);
+        reader.readMetadata();
+        if (stegoKey == null || stegoKey.isBlank()) {
+            return embedSequential(reader, input, output, createSequentialTextSession(text,
+                    encKey != null && !encKey.isBlank(), encKey, scheme,
+                    calculateCapacityBits(reader.getWidth(), reader.getHeight(), reader.getTotalFrames())));
         }
 
-        int payloadLen = payload.length;
-        int totalBytes = payloadLen + 4;
+        long totalPixels = (long) reader.getWidth() * reader.getHeight() * reader.getTotalFrames();
+        return embedRandom(reader, input, output,
+                createRandomTextSession(text, encKey != null && !encKey.isBlank(), encKey, scheme, totalPixels, stegoKey));
+    }
 
-        try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(input)) {
-            grabber.start();
+    public EmbedResult embedFile(File input, File output, File secretFile, String stegoKey, String encKey, Scheme scheme) throws Exception {
+        byte[] fileData = Files.readAllBytes(secretFile.toPath());
+        Reader reader = new Reader(input);
+        reader.readMetadata();
+        if (stegoKey == null || stegoKey.isBlank()) {
+            return embedSequential(reader, input, output, createSequentialFileSession(fileData,
+                    secretFile.getName(), encKey != null && !encKey.isBlank(), encKey, scheme,
+                    calculateCapacityBits(reader.getWidth(), reader.getHeight(), reader.getTotalFrames())));
+        }
 
-            int width = grabber.getImageWidth();
-            int height = grabber.getImageHeight();
-            int pixelsPerFrame = width * height;
-            long totalFrames = grabber.getLengthInVideoFrames();
+        long totalPixels = (long) reader.getWidth() * reader.getHeight() * reader.getTotalFrames();
+        return embedRandom(reader, input, output, createRandomFileSession(fileData, secretFile.getName(), encKey != null && !encKey.isBlank(), encKey, scheme, totalPixels, stegoKey));
+    }
 
-            if (totalFrames > 0 && totalBytes > totalFrames * pixelsPerFrame) {
-                throw new IllegalArgumentException("Kegedean bos");
+    /* So, the idea are to read 1 frames (and so on if the frames are alr full),
+    then we will take pixel sequentially from left to right and top to bottom
+    remember that 1 pixel contain r,g,b (which each of them are 8 bits).
+    depends on the lsb scheme, we'll embed 1 byte of the payload to each of each r,g,b lsb.
+    Continue until the payload are nothing left */ 
+    private EmbedResult embedSequential(Reader reader, File input, File output, SequentialEmbedSession session) throws Exception {
+        long[][] origHistogram = new long[3][256];
+        long[][] stegHistogram = new long[3][256];
+
+        int writtenFrames = Writer.writeTransformedFrames(output, input, reader.getFrameRate(),
+                reader.getWidth(), reader.getHeight(),
+                (frame, imageIndex, timestampMicros) -> {
+                    Metrics.accumulateHistogramData(frame, origHistogram);
+                    session.embedFrame(frame);
+                    Metrics.accumulateHistogramData(frame, stegHistogram);
+                    return frame;
+                });
+
+        if (writtenFrames <= 0) {
+            throw new IllegalStateException("No video frames found in selected video.");
+        }
+        if (!session.isComplete()) {
+            throw new IllegalStateException("Not enough video capacity to embed the full payload.");
+        }
+
+        long totalSamples = (long) writtenFrames * reader.getWidth() * reader.getHeight() * 3L;
+        double mse = totalSamples == 0 ? 0.0 : (double) session.getSquaredError() / totalSamples;
+        double psnr = mse == 0.0 ? Double.POSITIVE_INFINITY : 10.0 * Math.log10((255.0 * 255.0) / mse);
+
+        return new EmbedResult(mse, psnr, Metrics.averageHistogramData(origHistogram, writtenFrames), Metrics.averageHistogramData(stegHistogram, writtenFrames));
+    }
+
+    /* So, the idea are to read 1 frames (and so on if the frames are alr full),
+    then we will generate random number from seed that generated from the stego key.
+    These random onl to pick random pixel positions in 1 frame, then the rest are same step
+    as the sequential (so yeah, the computation time will slightly spike but its ok) */ 
+    private EmbedResult embedRandom(Reader reader, File input, File output, RandomEmbedSession session) throws Exception {
+        long[][] origHistogram = new long[3][256];
+        long[][] stegHistogram = new long[3][256];
+
+        int writtenFrames = Writer.writeTransformedFrames(output, input, reader.getFrameRate(),
+                reader.getWidth(), reader.getHeight(),
+                (frame, imageIndex, timestampMicros) -> {
+                    Metrics.accumulateHistogramData(frame, origHistogram);
+                    session.embedFrame(frame);
+                    Metrics.accumulateHistogramData(frame, stegHistogram);
+                    return frame;
+                });
+
+        if (writtenFrames <= 0) {
+            throw new IllegalStateException("No video frames found in selected video.");
+        }
+        if (!session.isComplete()) {
+            throw new IllegalStateException("Not enough video capacity to embed the full payload.");
+        }
+
+        long totalSamples = (long) writtenFrames * reader.getWidth() * reader.getHeight() * 3L;
+        double mse = totalSamples == 0 ? 0.0 : (double) session.getSquaredError() / totalSamples;
+        double psnr = mse == 0.0 ? Double.POSITIVE_INFINITY : 10.0 * Math.log10((255.0 * 255.0) / mse);
+
+        return new EmbedResult(mse, psnr, Metrics.averageHistogramData(origHistogram, writtenFrames), Metrics.averageHistogramData(stegHistogram, writtenFrames));
+    }
+
+    private static String toNullableString(Long value) {return value == null ? null : String.valueOf(value);}
+
+    public static SequentialEmbedSession createSequentialTextSession(String message, boolean encrypt, String encKey,
+            Scheme scheme, long capacityBits) {
+
+        byte[] payload = message.getBytes(StandardCharsets.UTF_8);
+        return createSequentialSession(payload, false, "", encrypt, encKey, scheme, capacityBits);
+    }
+
+    public static SequentialEmbedSession createSequentialFileSession(byte[] fileData, String fileName,
+            boolean encrypt, String encKey, Scheme scheme, long capacityBits) {
+
+        return createSequentialSession(fileData, true, fileName, encrypt, encKey, scheme, capacityBits);
+    }
+
+    public static RandomEmbedSession createRandomTextSession(String message, boolean encrypt, String encKey,
+            Scheme scheme, long totalPixels, String stegoKey) {
+
+        byte[] payload = message.getBytes(StandardCharsets.UTF_8);
+        return createRandomSession(payload, false, "", encrypt, encKey, scheme, totalPixels, stegoKey);
+    }
+
+    public static RandomEmbedSession createRandomFileSession(byte[] fileData, String fileName, boolean encrypt,
+            String encKey, Scheme scheme, long totalPixels, String stegoKey) {
+
+        return createRandomSession(fileData, true, fileName, encrypt, encKey, scheme, totalPixels, stegoKey);
+    }
+
+    public static long calculateCapacityBits(int width, int height, int totalFrames) {
+        return (long) width * height * totalFrames * 8L;
+    }
+
+    public static void validateCapacityBits(long requiredBits, long capacityBits) {
+        if (requiredBits > capacityBits) {
+            throw new IllegalArgumentException(String.format(
+                    "Message too large! Need %d bits but only %d bits available (%.2f KB > %.2f KB)",
+                    requiredBits, capacityBits,
+                    requiredBits / 8.0 / 1024.0,
+                    capacityBits / 8.0 / 1024.0));
+        }
+    }
+
+    public static long computeSeed(String stegoKey) {
+        long seed = stegoKey.hashCode();
+        for (int i = 0; i < stegoKey.length(); i++) {
+            seed = seed * 31L + stegoKey.charAt(i);
+        }
+        return seed;
+    }
+
+    public static long computeFrameSeed(long baseSeed, int frameIndex) {
+        long mixed = baseSeed ^ (0x9E3779B97F4A7C15L * (frameIndex + 1L));
+        mixed ^= (mixed >>> 30);
+        mixed *= 0xbf58476d1ce4e5b9L;
+        mixed ^= (mixed >>> 27);
+        mixed *= 0x94d049bb133111ebL;
+        return mixed ^ (mixed >>> 31);
+    }
+
+    public static long[] sampleRandomPositions(int totalPixels, int count, long seed) {
+        if (count < 0 || count > totalPixels) {
+            throw new IllegalArgumentException("Random sampling exceeds available pixels.");
+        }
+
+        Random random = new Random(seed);
+        long[] positions = new long[count];
+        int candidate;
+
+        if (count == 0) {
+            return positions;
+        }
+        if (count == totalPixels) {
+            for (int i = 0; i < count; i++) {
+                positions[i] = i;
             }
+            shufflePositions(positions, random);
+            return positions;
+        }
 
-            try (FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(output, width, height)) {
-                recorder.setVideoCodec(org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_HUFFYUV);
-                recorder.setFormat("avi");
-                recorder.setFrameRate(grabber.getFrameRate());
-                recorder.start();
+        BitSet used = new BitSet(totalPixels);
+        int selected = 0;
 
-                OpenCVFrameConverter.ToMat converter = new OpenCVFrameConverter.ToMat();
-                Frame frame;
-
-                int payloadIndex = 0;
-                boolean headerDone = false;
-                int frameIndex = 0;
-                Random randomizer = ((stegoKey != null) ? new Random(stegoKey) : null);
-
-                while ((frame = grabber.grabImage()) != null) {
-                    Mat mat = converter.convertToMat(frame);
-
-                    if (mat != null && payloadIndex < totalBytes) {
-                        UByteIndexer indexer = mat.createIndexer();
-
-                        List<Integer> pixelList = new ArrayList<>(pixelsPerFrame);
-                        int start = (frameIndex == 0) ? 4 : 0;
-
-                        for (int i = start; i < pixelsPerFrame; i++) {
-                            pixelList.add(i);
-                        }
-
-                        if (randomizer != null) {
-                            Collections.shuffle(pixelList, randomizer);
-                        }
-
-                        if (!headerDone) {
-                            for (int i = 0; i < 4; i++) {
-                                byte sizeByte = (byte) ((payloadLen >> (24 - i * 8)) & 255);
-                                embedByte(indexer, width, i, sizeByte);
-                            }
-                            headerDone = true;
-                        }
-
-                        int pixelIndex = 0;
-                        while (payloadIndex < payloadLen && pixelIndex < pixelList.size()) {
-                            int pos = pixelList.get(pixelIndex);
-                            embedByte(indexer, width, pos, payload[payloadIndex]);
-
-                            payloadIndex++;
-                            pixelIndex++;
-                        }
-
-                        Frame modified = converter.convert(mat);
-                        recorder.record(modified);
-                        mat.release();
-
-                    } else {
-                        recorder.record(frame);
-                    }
-                    frameIndex++;
-                }
-
-                if (payloadIndex < payloadLen) {
-                    throw new RuntimeException("Ga muat bro");
-                }
+        while (selected < count) {
+            candidate = random.nextInt(totalPixels);
+            if (!used.get(candidate)) {
+                used.set(candidate);
+                positions[selected++] = candidate;
             }
         }
+        return positions;
+    }
+
+    private static SequentialEmbedSession createSequentialSession(byte[] payload, boolean isFile, String fileName,
+            boolean encrypt, String encKey, Scheme scheme, long capacityBits) {
+
+        byte[] fullPayload = preparePayload(payload, isFile, fileName, encrypt, encKey, false, scheme);
+        validateCapacityBits((long) fullPayload.length * 8L, capacityBits);
+        return new SequentialEmbedSession(fullPayload, createPixelEncoder(scheme));
+    }
+
+    private static RandomEmbedSession createRandomSession(byte[] payload, boolean isFile, String fileName,
+            boolean encrypt, String encKey, Scheme scheme, long totalPixels, String stegoKey) {
+
+        byte[] fullPayload = preparePayload(payload, isFile, fileName, encrypt, encKey, true, scheme);
+        validateCapacityBits((long) fullPayload.length * 8L, totalPixels * 8L);
+        return new RandomEmbedSession(fullPayload, computeSeed(stegoKey), createPixelEncoder(scheme));
+    }
+
+    private static PixelEncoder createPixelEncoder(Scheme scheme) {
+        return new PixelEncoder(scheme);
+    }
+
+    private static byte[] preparePayload(byte[] payload, boolean isFile, String fileName, boolean encrypt, String encKey, boolean randomMode, Scheme scheme) {
+        byte[] data = payload;
+        if (encrypt && encKey != null && !encKey.isEmpty()) {
+            A5 cipher = new A5();
+            long key = deriveKey(encKey);
+            data = cipher.encrypt(payload, key, 0);
+        }
+
+        byte[] header = buildHeader(isFile, encrypt, randomMode, scheme, fileName, data.length);
+        byte[] fullPayload = new byte[header.length + data.length];
+        System.arraycopy(header, 0, fullPayload, 0, header.length);
+        System.arraycopy(data, 0, fullPayload, header.length, data.length);
+        return fullPayload;
+    }
+
+    private static byte[] buildHeader(boolean isFile, boolean encrypt, boolean randomMode, Scheme scheme, String fileName, int dataSize) {
+        byte flags = 0;
+        if (isFile) {
+            flags |= FLAG_FILE;
+        }
+        if (encrypt) {
+            flags |= FLAG_ENCRYPTED;
+        }
+        if (randomMode) {
+            flags |= FLAG_RANDOM;
+        }
+
+        byte[] fileNameBytes = (isFile && fileName != null) ? fileName.getBytes(StandardCharsets.UTF_8) : new byte[0];
+        int fileNameLen = fileNameBytes.length;
+
+        ByteBuffer buf = ByteBuffer.allocate(HEADER_SIZE + fileNameLen);
+        buf.put(flags);
+        buf.put((byte) scheme.getId());
+        buf.putInt(dataSize);
+        buf.putShort((short) fileNameLen);
+
+        if (fileNameLen > 0) {
+            buf.put(fileNameBytes);
+        }
+        return buf.array();
+    }
+
+    private static void shufflePositions(long[] positions, Random random) {
+        int j;
+        long tmp;
+
+        for (int i = positions.length - 1; i > 0; i--) {
+            j = random.nextInt(i + 1);
+            tmp = positions[i];
+            positions[i] = positions[j];
+            positions[j] = tmp;
+        }
+    }
+
+    private static long deriveKey(String userKey) {
+        byte[] hash = SHA256.digest(userKey.getBytes(StandardCharsets.UTF_8));
+        return ByteBuffer.wrap(hash, 0, Long.BYTES).getLong();
     }
 }
