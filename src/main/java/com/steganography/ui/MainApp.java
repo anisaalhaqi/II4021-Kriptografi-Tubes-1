@@ -18,7 +18,7 @@ public class MainApp extends Application {
 
     @Override
     public void start(Stage primaryStage) {
-        primaryStage.setTitle("StegAVI");
+        primaryStage.setTitle("StegVI");
 
         StackPane root = new StackPane();
         root.getStyleClass().add("main-container");

@@ -133,13 +133,11 @@
     -fx-padding: 0;
 }
 
-/* Hide the tab close button */
 .tab-pane > .tab-header-area > .headers-region > .tab > .tab-container > .tab-close-button {
     -fx-background-color: transparent;
     visibility: hidden;
 }
 
-/* Tab focus indicator line */
 .tab-pane:focused > .tab-header-area > .headers-region > .tab:selected .focus-indicator {
     -fx-border-color: transparent;
 }
