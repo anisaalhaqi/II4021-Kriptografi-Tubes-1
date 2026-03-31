@@ -13,6 +13,7 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import org.bytedeco.javacv.FFmpegLogCallback;
+import static org.bytedeco.ffmpeg.global.avutil.*;
 
 public class MainApp extends Application {
     private static final double WINDOW_WIDTH = 1100;
@@ -21,6 +22,7 @@ public class MainApp extends Application {
     @Override
     public void start(Stage primaryStage) {
         FFmpegLogCallback.set();
+        av_log_set_level(AV_LOG_ERROR);
         primaryStage.setTitle("StegVi");
         primaryStage.getIcons().add(new Image(getClass().getResourceAsStream("/image/ikuyo.png")));
 

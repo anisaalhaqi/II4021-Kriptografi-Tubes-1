@@ -5,7 +5,7 @@ plugins {
 }
 
 application {
-    mainClass = 'com.steganography.ui.MainApp'
+    mainClass = 'com.steganography.Launcher'
 }
 
 javafx {
@@ -25,4 +25,32 @@ dependencies {
 
 tasks.register('runCli', JavaExec) {
     enabled = false
+}
+
+tasks.register('executableJar', Jar) {
+    dependsOn classes
+    archiveBaseName = 'StegVI'
+    archiveVersion = ''
+    destinationDirectory = file("$projectDir/bin")
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    doFirst {
+        delete fileTree("$projectDir/bin")
+        file("$projectDir/bin").mkdirs()
+    }
+
+    manifest {
+        attributes 'Main-Class': application.mainClass.get()
+    }
+
+    from sourceSets.main.output
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+}
+
+tasks.register('packageApp') {
+    dependsOn executableJar
 }

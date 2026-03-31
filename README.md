@@ -23,7 +23,7 @@
   ·
   <a href="https://github.com/anisaalhaqi/II4021-Kriptografi-Tubes-1/blob/main/LICENSE">License</a>
   ·
-  <a href="https://github.com/anisaalhaqi/II4021-Kriptografi-Tubes-1/blob/main/doc/">Project Report</a>
+  <a href="https://github.com/anisaalhaqi/II4021-Kriptografi-Tubes-1/blob/main/doc/13523067_13523090_18224080_Tugas2_II4021.pdf">Project Report</a>
 </p>
 
 ## Authors
@@ -176,6 +176,26 @@ This will:
 
 # Linux / macOS
 ./gradlew clean
+```
+
+### Package Application
+If you want to generate the runnable application package, run:
+
+```bash
+# Windows
+.\gradlew.bat packageApp
+
+# Linux / macOS
+./gradlew packageApp
+```
+
+This command will generate:
+- `bin/StegVI.jar`
+
+You can then run the packaged application with:
+
+```bash
+java -jar bin/StegVI.jar
 ```
 
 ---
