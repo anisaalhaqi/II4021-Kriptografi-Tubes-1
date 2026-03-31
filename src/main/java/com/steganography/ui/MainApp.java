@@ -4,6 +4,7 @@ import javafx.application.Application;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
+import javafx.scene.image.Image;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
@@ -21,6 +22,7 @@ public class MainApp extends Application {
     public void start(Stage primaryStage) {
         FFmpegLogCallback.set();
         primaryStage.setTitle("StegVi");
+        primaryStage.getIcons().add(new Image(getClass().getResourceAsStream("/image/ikuyo.png")));
 
         StackPane root = new StackPane();
         root.getStyleClass().add("main-container");
