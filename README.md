@@ -3,7 +3,7 @@
 > Tugas 2 II4021 Kriptografi 2026
 
 <p align="center">
-  <img src="https://media.tenor.com/s3mh97FyKoIAAAAM/bocchi-the-rock-hitori-gotoh.gif" width="300" alt="StegVI banner" />
+  <img src="https://github.com/user-attachments/assets/0aacfc9d-96a6-470c-a3bd-059d84b0557f" width="800" alt="StegVI banner" />
 </p>
 
 <h3 align="center">Steganography for AVI and MP4 video with sequential/random embedding and A5/1 encryption</h3>
